@@ -68,12 +68,18 @@ def split_text_into_chunks(text, chunk_size):
 
 async def hotel_booking_handle(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
-    db.set_user_attribute(user_id, "last_interaction", datetime.now())
+    db.set_user_attribute(user_id, "state", "bookhotel")
     state = db.get_user_attribute(user_id, "state")
+    # Ask for number of adults
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                text="Please enter the number of adults:")
+    adults = await update.message.text  # Get the response
 
+    db.set_user_attribute(user_id, "adults", adults)
+        
     await context.bot.send_message(chat_id=update.effective_chat.id, text="REALTIME Checking Hotel Availability and Prices for you. Please wait for the magic... 🪄", parse_mode='HTML')
-    response = requests.get(
-        'http://host.docker.internal:5000/scrape?arrive=2023-09-01&depart=2023-09-05&adults={adults}&child=2&childages=3|9&rooms=1&hotel_id=64518&currency=IDR')
+    api_url= f"http://host.docker.internal:5000/scrape?arrive=2023-09-01&depart=2023-09-05&adults={adults}&child=2&childages=3|9&rooms=1&hotel_id=64518&currency=IDR"
+    response = requests.get(api_url)
     hotel_data = response.json()
 
     headers = hotel_data[0].keys()
@@ -85,14 +91,17 @@ async def hotel_booking_handle(update: Update, context: CallbackContext):
     await context.bot.send_message(chat_id=update.effective_chat.id, text="<b>Realtime Check done! ⚡</b> Here we go, your EOA Hotel Quote 🏨\n\n", parse_mode='HTML')
     message_intro = f"We got <b>{len(df)}</b> options for you:\n\n"
     await context.bot.send_message(chat_id=update.effective_chat.id, text=message_intro, parse_mode='HTML')
+
     for _, row in df.iterrows():
         message = f"<b>Room Type:</b> {row['room_name']}\n"
         message += f"Rate Name: {row['rate_name']}\n"
         message += f"Rate Description:\n{row['rate_description']}\n\n"
         message += f"Nights: {row['nights']}\n"
-        message += f"<b>Your EOA Price Per Night:</b> IDR {row['markup_price']:,}\n"
-        message += f"Published Website Price IDR {row['price_per_night']:,}\n"
-        message += f"<b>Your EOA Price Total:</b> IDR {row['total_markup_price']:,}\n\n"
+        usd_price_per_night = int(row['markup_price'] * exchange_rate)
+        usd_total_price = int(row['total_markup_price'] * exchange_rate)
+        message += f"<b>Your EOA Price Per Night:</b> IDR {row['markup_price']:,} (USD {usd_price_per_night:,.2f}\n"
+        message += f"Published Price on Website IDR {row['price_per_night']:,}\n"
+        message += f"<b>Your EOA Price Total:</b> IDR {row['total_markup_price']:,} (USD {usd_total_price:,.2f}\n\"
         # message += f"Total Price: {row['total_price']}\n"
         # message += f"EOA Contract Price: {row['hard_coded_price']}\n"
         # message += f"Quote Price: {row['markup_price']}\n"
@@ -101,8 +110,8 @@ async def hotel_booking_handle(update: Update, context: CallbackContext):
         usd_price_per_night = int(row['markup_price'] * exchange_rate)
         usd_total_price = int(row['total_markup_price'] * exchange_rate)
 
-        message += f"Estimated USD Price Per Night: USD {usd_price_per_night:,.2f}\n"
-        message += f"<b>Estimated USD Price Total:</b>USD {usd_total_price:,.2f}\n\n"
+       # message += f"Estimated USD Price Per Night: USD {usd_price_per_night:,.2f}\n"
+       # message += f"<b>Estimated USD Price Total:</b>USD {usd_total_price:,.2f}\n\n"
 
         await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='HTML')
 
@@ -205,6 +214,10 @@ async def start_handle(update: Update, context: CallbackContext):
 
     await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML)
     await show_chat_modes_handle(update, context)
+
+    # Send a PDF file
+    with open('flyer.pdf', 'rb') as pdf_file:
+        await update.message.reply_document(pdf_file, caption="Our latest special offers!")
 
 
 # async def forward_to_support_group(update: Update, context: CallbackContext):
@@ -797,7 +810,7 @@ async def post_init(application: Application):
         BotCommand("/settings", "Show settings"),
         BotCommand("/help", "Show help message"),
         BotCommand("/human", "Chat with us direvtly"),
-        BotCommand("/get_chat_id", "Get chat id"),
+        BotCommand("/get_chat_id", "Get chat id")
         BotCommand("/start", "Restart the bot")
     ])
 

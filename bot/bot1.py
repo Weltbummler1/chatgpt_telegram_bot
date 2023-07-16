@@ -1,4 +1,6 @@
+from telegram.ext import ConversationHandler
 import pandas as pd
+import httpx
 import tabulate
 import requests
 import openai_utils
@@ -34,8 +36,17 @@ import pydub
 from pathlib import Path
 from datetime import datetime
 import openai
+from telegram import Update
 import locale
+from telegram.ext import (
+    ConversationHandler, CommandHandler, MessageHandler, Filters)
+from telegram import Update
+from telegram.ext.callbackcontext import CallbackContext
+
 locale.setlocale(locale.LC_ALL, '')
+# Define constants for each state in the conversation
+GET_ADULTS, GET_CHILDREN, GET_CHILDAGES, GET_ROOMS, GET_ARRIVAL_DATE, GET_DEPARTURE_DATE = range(
+    6)
 
 
 # setup
@@ -66,47 +77,97 @@ def split_text_into_chunks(text, chunk_size):
         yield text[i:i + chunk_size]
 
 
+'''
 async def hotel_booking_handle(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     db.set_user_attribute(user_id, "last_interaction", datetime.now())
     state = db.get_user_attribute(user_id, "state")
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="REALTIME Checking Hotel Availability and Prices for you. Please wait for the magic... 🪄", parse_mode='HTML')
-    response = requests.get(
-        'http://host.docker.internal:5000/scrape?arrive=2023-09-01&depart=2023-09-05&adults={adults}&child=2&childages=3|9&rooms=1&hotel_id=64518&currency=IDR')
-    hotel_data = response.json()
+    if state == "waiting_for_adults":
+        adults = update.message.text
+        db.set_user_attribute(user_id, "adults", adults)
 
-    headers = hotel_data[0].keys()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter the number of children:")
+        db.set_user_attribute(user_id, "state", "waiting_for_children")
 
-    table = tabulate.tabulate(hotel_data, headers='keys', tablefmt="grid")
-    df = pd.DataFrame(hotel_data)
-    exchange_rate = 0.000067  # Example exchange rate
+    elif state == "waiting_for_children":
+        children = update.message.text
+        db.set_user_attribute(user_id, "children", children)
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="<b>Realtime Check done! ⚡</b> Here we go, your EOA Hotel Quote 🏨\n\n", parse_mode='HTML')
-    message_intro = f"We got <b>{len(df)}</b> options for you:\n\n"
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_intro, parse_mode='HTML')
-    for _, row in df.iterrows():
-        message = f"<b>Room Type:</b> {row['room_name']}\n"
-        message += f"Rate Name: {row['rate_name']}\n"
-        message += f"Rate Description:\n{row['rate_description']}\n\n"
-        message += f"Nights: {row['nights']}\n"
-        message += f"<b>Your EOA Price Per Night:</b> IDR {row['markup_price']:,}\n"
-        message += f"Published Website Price IDR {row['price_per_night']:,}\n"
-        message += f"<b>Your EOA Price Total:</b> IDR {row['total_markup_price']:,}\n\n"
-        # message += f"Total Price: {row['total_price']}\n"
-        # message += f"EOA Contract Price: {row['hard_coded_price']}\n"
-        # message += f"Quote Price: {row['markup_price']}\n"
-        # message += f"IDR Profit: {row['profit']}\n"
-        # message += f"USD Profit: {row['USD profit']}\n"
-        usd_price_per_night = int(row['markup_price'] * exchange_rate)
-        usd_total_price = int(row['total_markup_price'] * exchange_rate)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter the children's ages (separated by '|'):")
+        db.set_user_attribute(user_id, "state", "waiting_for_childages")
 
-        message += f"Estimated USD Price Per Night: USD {usd_price_per_night:,.2f}\n"
-        message += f"<b>Estimated USD Price Total:</b>USD {usd_total_price:,.2f}\n\n"
+    elif state == "waiting_for_childages":
+        childages = update.message.text
+        db.set_user_attribute(user_id, "childages", childages)
 
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='HTML')
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter the number of rooms:")
+        db.set_user_attribute(user_id, "state", "waiting_for_rooms")
 
-    '''
+    elif state == "waiting_for_rooms":
+        rooms = update.message.text
+        db.set_user_attribute(user_id, "rooms", rooms)
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter the arrival date (YYYY-MM-DD):")
+        db.set_user_attribute(user_id, "state", "waiting_for_arrival_date")
+
+    elif state == "waiting_for_arrival_date":
+        arrival_date = update.message.text
+        db.set_user_attribute(user_id, "arrival_date", arrival_date)
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter the departure date (YYYY-MM-DD):")
+        db.set_user_attribute(user_id, "state", "waiting_for_departure_date")
+
+    elif state == "waiting_for_departure_date":
+        departure_date = update.message.text
+        db.set_user_attribute(user_id, "departure_date", departure_date)
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="REALTIME Checking Hotel Availability and Prices for you. Please wait for the magic... 🪄", parse_mode='HTML')
+
+        adults = db.get_user_attribute(user_id, "adults")
+        children = db.get_user_attribute(user_id, "children")
+        childages = db.get_user_attribute(user_id, "childages")
+        rooms = db.get_user_attribute(user_id, "rooms")
+        arrival_date = db.get_user_attribute(user_id, "arrival_date")
+        departure_date = db.get_user_attribute(user_id, "departure_date")
+
+        api_url = f"http://host.docker.internal:5000/scrape?arrive={arrival_date}&depart={departure_date}&adults={adults}&child={children}&childages={childages}&rooms={rooms}&hotel_id=64518&currency=IDR"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(api_url)
+        hotel_data = response.json()
+
+        headers = hotel_data[0].keys()
+        table = tabulate.tabulate(hotel_data, headers='keys', tablefmt="grid")
+        df = pd.DataFrame(hotel_data)
+        exchange_rate = 0.000067  # Example exchange rate
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="<b>Realtime Check done! ⚡</b> Here we go, your EOA Hotel Quote 🏨\n\n", parse_mode='HTML')
+        message_intro = f"We got <b>{len(df)}</b> options for you:\n\n"
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=message_intro, parse_mode='HTML')
+
+        for _, row in df.iterrows():
+            message = f"<b>Room Type:</b> {row['room_name']}\n"
+            message += f"Rate Name: {row['rate_name']}\n"
+            message += f"Rate Description:\n{row['rate_description']}\n\n"
+            message += f"Nights: {row['nights']}\n"
+            message += f"<b>Your EOA Price Per Night:</b> IDR {row['markup_price']:,}\n"
+            message += f"Published Website Price IDR {row['price_per_night']:,}\n"
+            message += f"<b>Your EOA Price Total:</b> IDR {row['total_markup_price']:,}\n\n"
+
+            usd_price_per_night = int(row['markup_price'] * exchange_rate)
+            usd_total_price = int(row['total_markup_price'] * exchange_rate)
+
+            message += f"Estimated USD Price Per Night: USD {usd_price_per_night:,.2f}\n"
+            message += f"<b>Estimated USD Price Total:</b> USD {usd_total_price:,.2f}\n\n"
+
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='HTML')
+
+        db.set_user_attribute(user_id, "state", "")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter the number of adults:")
+        db.set_user_attribute(user_id, "state", "waiting_for_adults")
+
+    
     if state == CITY:
         # Store the city and ask for the date
         db.set_user_attribute(user_id, "city", update.message.text)
@@ -124,6 +185,119 @@ async def hotel_booking_handle(update: Update, context: CallbackContext):
         # Call your hotel booking API here with the collected data
         db.set_user_attribute(user_id, "state", None)  # Clear the state when done
         '''
+
+
+# Define constants for each state in the conversation
+GET_ADULTS, GET_CHILDREN, GET_CHILDAGES, GET_ROOMS, GET_ARRIVAL_DATE, GET_DEPARTURE_DATE = range(
+    6)
+
+
+async def start(update: Update, context: CallbackContext):
+    update.message.reply_text('Please enter the number of adults:')
+    return GET_ADULTS
+
+
+async def get_adults(update: Update, context: CallbackContext):
+    adults = update.message.text
+    context.user_data['adults'] = adults
+    update.message.reply_text('Please enter the number of children:')
+    return GET_CHILDREN
+
+
+async def get_children(update: Update, context: CallbackContext):
+    children = update.message.text
+    context.user_data['children'] = children
+    update.message.reply_text(
+        'Please enter the ages of the children (separated by "|"):')
+    return GET_CHILDAGES
+
+
+async def get_childages(update: Update, context: CallbackContext):
+    childages = update.message.text
+    context.user_data['childages'] = childages
+    update.message.reply_text('Please enter the number of rooms:')
+    return GET_ROOMS
+
+
+async def get_rooms(update: Update, context: CallbackContext):
+    rooms = update.message.text
+    context.user_data['rooms'] = rooms
+    update.message.reply_text('Please enter the arrival date (YYYY-MM-DD):')
+    return GET_ARRIVAL_DATE
+
+
+async def get_arrival_date(update: Update, context: CallbackContext):
+    arrival_date = update.message.text
+    context.user_data['arrival_date'] = arrival_date
+    update.message.reply_text('Please enter the departure date (YYYY-MM-DD):')
+    return GET_DEPARTURE_DATE
+
+
+async def get_departure_date(update: Update, context: CallbackContext):
+    departure_date = update.message.text
+    context.user_data['departure_date'] = departure_date
+    return process_booking(update, context)
+
+
+async def process_booking(update: Update, context: CallbackContext):
+    # Process the data collected from the user
+    adults = context.user_data['adults']
+    children = context.user_data['children']
+    childages = context.user_data['childages']
+    rooms = context.user_data['rooms']
+    arrival_date = context.user_data['arrival_date']
+    departure_date = context.user_data['departure_date']
+    api_url = f"http://host.docker.internal:5000/scrape?arrive={arrival_date}&depart={departure_date}&adults={adults}&child={children}&childages={childages}&rooms={rooms}&hotel_id=64518&currency=IDR"
+    async with httpx.AsyncClient() as client:
+        response = await client.get(api_url)
+    hotel_data = response.json()
+
+    headers = hotel_data[0].keys()
+    table = tabulate.tabulate(hotel_data, headers='keys', tablefmt="grid")
+    df = pd.DataFrame(hotel_data)
+    exchange_rate = 0.000067  # Example exchange rate
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="<b>Realtime Check done! ⚡</b> Here we go, your EOA Hotel Quote 🏨\n\n", parse_mode='HTML')
+    message_intro = f"We got <b>{len(df)}</b> options for you:\n\n"
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_intro, parse_mode='HTML')
+
+    for _, row in df.iterrows():
+        message = f"<b>Room Type:</b> {row['room_name']}\n"
+        message += f"Rate Name: {row['rate_name']}\n"
+        message += f"Rate Description:\n{row['rate_description']}\n\n"
+        message += f"Nights: {row['nights']}\n"
+        message += f"<b>Your EOA Price Per Night:</b> IDR {row['markup_price']:,}\n"
+        message += f"Published Website Price IDR {row['price_per_night']:,}\n"
+        message += f"<b>Your EOA Price Total:</b> IDR {row['total_markup_price']:,}\n\n"
+
+        usd_price_per_night = int(row['markup_price'] * exchange_rate)
+        usd_total_price = int(row['total_markup_price'] * exchange_rate)
+
+        message += f"Estimated USD Price Per Night: USD {usd_price_per_night:,.2f}\n"
+        message += f"<b>Estimated USD Price Total:</b> USD {usd_total_price:,.2f}\n\n"
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=message, parse_mode='HTML')
+
+
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text('Booking process cancelled.')
+    return ConversationHandler.END
+
+
+conversation_handler = ConversationHandler(
+    entry_points=[CommandHandler('bookhotel', start)],
+    states={
+        GET_ADULTS: [MessageHandler(Filters.text & ~Filters.command, get_adults)],
+        GET_CHILDREN: [MessageHandler(Filters.text & ~Filters.command, get_children)],
+        GET_CHILDAGES: [MessageHandler(Filters.text & ~Filters.command, get_childages)],
+        GET_ROOMS: [MessageHandler(Filters.text & ~Filters.command, get_rooms)],
+        GET_ARRIVAL_DATE: [MessageHandler(Filters.text & ~Filters.command, get_arrival_date)],
+        GET_DEPARTURE_DATE: [MessageHandler(Filters.text & ~Filters.command, get_departure_date)],
+    },
+    fallbacks=[CommandHandler('cancel', cancel)],
+)
+
+application.add_handler(conversation_handler)
 
 
 async def register_user_if_not_exists(update: Update, context: CallbackContext, user: User):
@@ -844,10 +1018,15 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("get_chat_id", get_chat_id))
     application.add_handler(CommandHandler(
         "human", send_channel_message, filters=user_filter))
+
+    # High priority for hotel_booking_handle to match numbers in response to questions
+    # application.add_handler(MessageHandler(filters.Regex(
+    #    r'^[0-9]+$') & filters.TEXT & ~filters.COMMAND & user_filter, hotel_booking_handle), group=1)
+
     application.add_handler(MessageHandler(filters.Regex(
         r'book hotel') & filters.TEXT & ~filters.COMMAND & user_filter, book_hotel_handle))
-    application.add_handler(CommandHandler(
-        "bookhotel", book_hotel_handle, filters=user_filter))
+    application.add_handler(MessageHandler(filters.Regex(
+        r'bookhotel') & filters.TEXT & ~filters.COMMAND & user_filter, hotel_booking_handle))
 
     application.add_handler(CommandHandler(
         "start", start_handle, filters=user_filter))
@@ -856,8 +1035,10 @@ def run_bot() -> None:
     application.add_handler(CommandHandler(
         "help_group_chat", help_group_chat_handle, filters=user_filter))
 
+    # Lower priority for message_handle to match all other text messages
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & user_filter, message_handle))
+        filters.TEXT & ~filters.COMMAND & user_filter, message_handle), group=2)
+
     application.add_handler(CommandHandler(
         "retry", retry_handle, filters=user_filter))
     application.add_handler(CommandHandler(
